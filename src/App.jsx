@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 
-const SAMPLE_WORDS = ['resilient', 'serendipity', 'eloquent', 'ephemeral', 'ubiquitous'];
+const SAMPLE_WORDS = ['resilient', 'serendipity', 'eloquent', '蘋果', '機會'];
 
 // 內建必考精選單字庫
 const STARTER_DECK = [
@@ -31,12 +31,18 @@ function shuffleArray(array) {
   return arr;
 }
 
+// 偵測字串是否包含中文字元
+function containsChinese(text) {
+  return /[\u4e00-\u9fa5]/.test(text);
+}
+
 export default function App() {
   const [darkMode, setDarkMode] = useState(false);
   const [activeTab, setActiveTab] = useState('search'); 
   const [query, setQuery] = useState('');
   const [wordData, setWordData] = useState(null);
   const [zhTranslation, setZhTranslation] = useState('');
+  const [searchedFromZh, setSearchedFromZh] = useState(''); // 記錄使用者原本輸入的中文
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -92,35 +98,69 @@ export default function App() {
     window.speechSynthesis.speak(utterance);
   };
 
-  const handleSearch = async (targetWord) => {
-    const searchWord = (typeof targetWord === 'string' ? targetWord : query).trim().toLowerCase();
-    if (!searchWord) return;
+  // 支援中英雙向查詢
+  const handleSearch = async (targetInput) => {
+    const rawInput = (typeof targetInput === 'string' ? targetInput : query).trim();
+    if (!rawInput) return;
 
-    setQuery(searchWord);
+    setQuery(rawInput);
     setLoading(true);
     setError('');
     setWordData(null);
     setZhTranslation('');
+    setSearchedFromZh('');
 
     try {
+      let targetEnglishWord = rawInput.toLowerCase();
+      let originalZh = '';
+
+      // 步驟 1：若輸入包含中文，先透過翻譯 API 轉成英文單字
+      if (containsChinese(rawInput)) {
+        originalZh = rawInput;
+        const zhToEnRes = await fetch(
+          `https://api.mymemory.translated.net/get?q=${encodeURIComponent(rawInput)}&langpair=zh-TW|en`
+        );
+        if (!zhToEnRes.ok) {
+          throw new Error('中文翻譯服務暫時無法連線，請稍後再試！');
+        }
+        const zhToEnJson = await zhToEnRes.json();
+        const translatedEn = zhToEnJson?.responseData?.translatedText || '';
+        // 清理可能附帶的標點符號並轉小寫
+        targetEnglishWord = translatedEn.replace(/[.,!?;:'"()]/g, '').trim().toLowerCase();
+
+        if (!targetEnglishWord || containsChinese(targetEnglishWord)) {
+          throw new Error(`無法將「${rawInput}」翻譯成對應的英文單字，請試著換個說法！`);
+        }
+        setSearchedFromZh(originalZh);
+      }
+
+      // 步驟 2：用英文單字查詢字典與繁體中文解釋
       const [dictRes, transRes] = await Promise.all([
-        fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(searchWord)}`),
-        fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(searchWord)}&langpair=en|zh-TW`).catch(() => null),
+        fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(targetEnglishWord)}`),
+        originalZh
+          ? Promise.resolve(null)
+          : fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(targetEnglishWord)}&langpair=en|zh-TW`).catch(() => null),
       ]);
 
       if (!dictRes.ok) {
+        if (originalZh) {
+          throw new Error(`「${originalZh}」翻譯為 "${targetEnglishWord}"，但字典中找不到此詞條的詳細解釋（可能是片語或專有名詞）。`);
+        }
         throw new Error('找不到這個單字，請檢查拼字是否正確！');
       }
 
       const dictJson = await dictRes.json();
       setWordData(dictJson[0]);
 
-      setRecentSearches((prev) => [searchWord, ...prev.filter((w) => w !== searchWord)].slice(0, 8));
+      // 更新最近查詢紀錄（記錄查到的英文單字）
+      setRecentSearches((prev) => [targetEnglishWord, ...prev.filter((w) => w !== targetEnglishWord)].slice(0, 8));
 
-      if (transRes && transRes.ok) {
+      if (originalZh) {
+        setZhTranslation(originalZh);
+      } else if (transRes && transRes.ok) {
         const transJson = await transRes.json();
         const translated = transJson?.responseData?.translatedText;
-        if (translated && translated.toLowerCase() !== searchWord) {
+        if (translated && translated.toLowerCase() !== targetEnglishWord) {
           setZhTranslation(translated);
         }
       }
@@ -338,7 +378,7 @@ export default function App() {
             <h1 style={{ ...styles.title, color: theme.textMain }}>我的英文單字學習網</h1>
           </div>
           <p style={{ ...styles.subtitle, color: theme.textSub }}>
-            英漢雙語字典 • 熟練度分級 • 聽力聽寫 • 不重複洗牌測驗
+            中英雙向字典 • 熟練度分級 • 聽力聽寫 • 不重複洗牌測驗
           </p>
 
           <nav style={styles.nav}>
@@ -346,7 +386,7 @@ export default function App() {
               style={activeTab === 'search' ? styles.navBtnActive : { ...styles.navBtn, backgroundColor: theme.cardBg, color: theme.textSub, borderColor: theme.border }}
               onClick={() => setActiveTab('search')}
             >
-              🔍 單字查詢
+              🔍 中英雙向查詢
             </button>
             <button
               style={activeTab === 'vocab' ? styles.navBtnActive : { ...styles.navBtn, backgroundColor: theme.cardBg, color: theme.textSub, borderColor: theme.border }}
@@ -373,7 +413,7 @@ export default function App() {
                 type="text"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="輸入英文單字 (例如: resilient, apple)..."
+                placeholder="輸入英文或中文 (例如: resilient、蘋果、機會)..."
                 style={{ ...styles.input, backgroundColor: 'transparent', color: theme.textMain }}
               />
               <button type="submit" style={styles.searchBtn} disabled={loading}>
@@ -405,6 +445,12 @@ export default function App() {
 
             {wordData && (
               <div style={{ ...styles.card, backgroundColor: theme.cardBg }}>
+                {searchedFromZh && (
+                  <div style={styles.zhSearchBanner}>
+                    🔄 已自動將中文「<strong>{searchedFromZh}</strong>」轉換為對應英文單字
+                  </div>
+                )}
+
                 <div style={{ ...styles.wordHeader, borderBottomColor: theme.border }}>
                   <div>
                     <div style={{ display: 'flex', alignItems: 'baseline', gap: '12px', flexWrap: 'wrap' }}>
@@ -417,7 +463,6 @@ export default function App() {
                       <div style={styles.zhBadge}>中文意思：{zhTranslation}</div>
                     )}
                     
-                    {/* 新增：權威字典外連按鈕 */}
                     <div style={{ marginTop: '12px', display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
                       <a href={`https://dictionary.cambridge.org/zht/dictionary/english-chinese-traditional/${wordData.word}`} target="_blank" rel="noreferrer" style={styles.dictLinkCam}>📕 劍橋字典</a>
                       <a href={`https://www.oxfordlearnersdictionaries.com/definition/english/${wordData.word}`} target="_blank" rel="noreferrer" style={styles.dictLinkOx}>📘 牛津字典</a>
@@ -502,7 +547,7 @@ export default function App() {
 
             {savedWords.length === 0 ? (
               <div style={{ ...styles.emptyBox, backgroundColor: theme.cardBg, color: theme.textSub }}>
-                目前生字本還是空的喔！你可以按上方的「✨ 一鍵匯入 10 個必考單字」，或去「單字查詢」搜尋收藏。
+                目前生字本還是空的喔！你可以按上方的「✨ 一鍵匯入 10 個必考單字」，或去「中英雙向查詢」搜尋收藏。
               </div>
             ) : (
               <div style={styles.grid}>
@@ -795,6 +840,15 @@ const styles = {
     borderRadius: '16px',
     padding: '28px',
     boxShadow: '0 10px 25px rgba(15, 23, 42, 0.06)',
+  },
+  zhSearchBanner: {
+    backgroundColor: '#eff6ff',
+    color: '#1e40af',
+    padding: '8px 14px',
+    borderRadius: '8px',
+    fontSize: '13px',
+    marginBottom: '16px',
+    border: '1px solid #bfdbfe',
   },
   wordHeader: {
     display: 'flex',
